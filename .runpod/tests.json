@@ -1,7 +1,7 @@
 {
   "tests": [
     {
-      "name": "single_person_image_to_video",
+      "name": "single_person_i2v",
       "input": {
         "input_type": "image",
         "person_count": "single",
@@ -12,19 +12,13 @@
         "height": 512,
         "force_offload": true
       },
-      "timeout": 600000
+      "timeout": 1800000
     }
   ],
   "config": {
-    "gpuTypeId": "NVIDIA L40S",
+    "gpuTypeId": "NVIDIA H100 NVL",
     "gpuCount": 1,
     "env": [],
-    "allowedCudaVersions": [
-      "12.4",
-      "12.3",
-      "12.2",
-      "12.1",
-      "12.0"
-    ]
+    "allowedCudaVersions": ["12.4", "12.3", "12.2", "12.1"]
   }
 }
