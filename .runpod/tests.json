@@ -1,0 +1,30 @@
+{
+  "tests": [
+    {
+      "name": "single_person_image_to_video",
+      "input": {
+        "input_type": "image",
+        "person_count": "single",
+        "image_url": "https://litter.catbox.moe/lniowd.jpg",
+        "wav_url": "https://litter.catbox.moe/0ubkwq.mp3",
+        "prompt": "a person is talking expressively, natural hand gestures",
+        "width": 512,
+        "height": 512,
+        "force_offload": true
+      },
+      "timeout": 600000
+    }
+  ],
+  "config": {
+    "gpuTypeId": "NVIDIA L40S",
+    "gpuCount": 1,
+    "env": [],
+    "allowedCudaVersions": [
+      "12.4",
+      "12.3",
+      "12.2",
+      "12.1",
+      "12.0"
+    ]
+  }
+}

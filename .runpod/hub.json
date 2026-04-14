@@ -1,0 +1,23 @@
+{
+  "title": "InfiniteTalk",
+  "description": "Audio-driven talking head video generation. Give it a face image + audio → get a full-body expressive talking video. No 15s limit. Works on all Ada Lovelace GPUs (24GB+).",
+  "type": "serverless",
+  "category": "video",
+  "iconUrl": "https://raw.githubusercontent.com/MeiGen-AI/InfiniteTalk/main/assets/logo2.jpg",
+  "config": {
+    "runsOn": "GPU",
+    "containerDiskInGb": 60,
+    "presets": [
+      {
+        "name": "Single Person 480p",
+        "defaults": {
+          "INPUT_TYPE": "image",
+          "PERSON_COUNT": "single",
+          "WIDTH": "512",
+          "HEIGHT": "512"
+        }
+      }
+    ],
+    "env": []
+  }
+}

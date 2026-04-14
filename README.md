@@ -6,6 +6,8 @@
 
 <h1>InfiniteTalk: Audio-driven Video Generation for Sparse-Frame Video Dubbing</h1>
 
+[![Runpod](https://api.runpod.io/badge/nish261/InfiniteTalk)](https://console.runpod.io/hub/nish261/InfiniteTalk)
+
 
 [Shaoshu Yang*](https://scholar.google.com/citations?user=JrdZbTsAAAAJ&hl=en) · [Zhe Kong*](https://scholar.google.com/citations?user=4X3yLwsAAAAJ&hl=zh-CN) · [Feng Gao*](https://scholar.google.com/citations?user=lFkCeoYAAAAJ) · [Meng Cheng*]() · [Xiangyu Liu*]() · [Yong Zhang](https://yzhang2016.github.io/)<sup>&#9993;</sup> · [Zhuoliang Kang](https://scholar.google.com/citations?user=W1ZXjMkAAAAJ&hl=en)
 
