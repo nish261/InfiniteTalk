@@ -37,7 +37,10 @@ RUN cd /ComfyUI/custom_nodes && \
 
 RUN cd /ComfyUI/custom_nodes && \
     git clone https://github.com/kijai/ComfyUI-WanVideoWrapper && \
-    cd ComfyUI-WanVideoWrapper && pip install -r requirements.txt
+    cd ComfyUI-WanVideoWrapper && pip install -r requirements.txt && \
+    # Patch allow_fp16_accumulation to be conditional (requires torch 2.7 nightly, not in 2.6 stable)
+    find /ComfyUI/custom_nodes/ComfyUI-WanVideoWrapper -name "*.py" -exec \
+        sed -i 's/torch\.backends\.cuda\.matmul\.allow_fp16_accumulation\s*=\s*\(.*\)/if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"): torch.backends.cuda.matmul.allow_fp16_accumulation = \1/g' {} \;
 
 RUN mkdir -p /ComfyUI/models/diffusion_models \
              /ComfyUI/models/loras \
