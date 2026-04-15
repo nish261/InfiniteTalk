@@ -233,6 +233,34 @@ def handler(job):
                 return {"error": "ComfyUI failed to respond"}
             import time; time.sleep(2)
 
+    # ── Verify required nodes are registered ─────────────────────────────
+    REQUIRED_NODES = [
+        "MultiTalkModelLoader",
+        "WanVideoModelLoader",
+        "WanVideoImageToVideoMultiTalk",
+        "MultiTalkWav2VecEmbeds",
+    ]
+    try:
+        obj_info = json.loads(urllib.request.urlopen(
+            f"http://{server_address}:8188/object_info", timeout=10
+        ).read())
+        missing_nodes = [n for n in REQUIRED_NODES if n not in obj_info]
+        if missing_nodes:
+            # Grab relevant ComfyUI log lines to surface import errors
+            log_excerpt = ""
+            try:
+                with open("/tmp/comfyui.log") as lf:
+                    lines = lf.readlines()
+                relevant = [l.strip() for l in lines if any(
+                    k in l for k in ["MultiTalk", "WanVideoWrapper WARNING", "Error", "Traceback", "ImportError", "ModuleNotFoundError"]
+                )]
+                log_excerpt = "\n".join(relevant[-30:])
+            except Exception:
+                pass
+            return {"error": f"Missing ComfyUI nodes: {missing_nodes}. Log:\n{log_excerpt}"}
+    except Exception as e:
+        logger.warning(f"Node check failed: {e}")
+
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     ws = websocket.WebSocket()
     for attempt in range(36):

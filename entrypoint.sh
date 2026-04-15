@@ -68,7 +68,7 @@ else
 fi
 
 echo "Starting ComfyUI..."
-python /ComfyUI/main.py --listen --use-split-cross-attention &
+python /ComfyUI/main.py --listen --use-split-cross-attention > /tmp/comfyui.log 2>&1 &
 COMFY_PID=$!
 
 echo "Waiting for ComfyUI..."
