@@ -7,6 +7,7 @@ import uuid
 import logging
 import urllib.request
 import urllib.parse
+import urllib.error
 import binascii
 import subprocess
 import librosa
@@ -59,8 +60,12 @@ def queue_prompt(prompt, input_type="image", person_count="single"):
     data = json.dumps(p).encode("utf-8")
     req = urllib.request.Request(url, data=data)
     req.add_header("Content-Type", "application/json")
-    response = urllib.request.urlopen(req)
-    return json.loads(response.read())
+    try:
+        response = urllib.request.urlopen(req)
+        return json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise Exception(f"ComfyUI /prompt rejected (HTTP {e.code}): {body}")
 
 
 def get_history(prompt_id):
@@ -193,9 +198,18 @@ def handler(job):
     with open(workflow_path) as f:
         prompt = json.load(f)
 
+    # Copy inputs into ComfyUI input dir (ComfyUI validates paths relative to input/)
+    comfy_input_dir = "/ComfyUI/input"
+    os.makedirs(comfy_input_dir, exist_ok=True)
+    img_name = f"{task_id}_image.jpg"
+    wav_name = f"{task_id}_audio.wav"
+    shutil.copy2(media_path, f"{comfy_input_dir}/{img_name}")
+    shutil.copy2(wav_path, f"{comfy_input_dir}/{wav_name}")
+    logger.info(f"Copied inputs → /ComfyUI/input/{img_name}, {wav_name}")
+
     # Inject parameters
-    prompt["284"]["inputs"]["image"]  = media_path
-    prompt["125"]["inputs"]["audio"]  = wav_path
+    prompt["284"]["inputs"]["image"]  = img_name
+    prompt["125"]["inputs"]["audio"]  = wav_name
     prompt["241"]["inputs"]["positive_prompt"] = prompt_text
     prompt["245"]["inputs"]["value"]  = width
     prompt["246"]["inputs"]["value"]  = height
@@ -231,6 +245,13 @@ def handler(job):
 
     videos = get_videos(ws, prompt, input_type, person_count)
     ws.close()
+
+    # Cleanup ComfyUI input copies
+    for fn in [img_name, wav_name]:
+        try:
+            os.unlink(f"{comfy_input_dir}/{fn}")
+        except Exception:
+            pass
 
     # ── Find output video ─────────────────────────────────────────────────
     output_path = None
