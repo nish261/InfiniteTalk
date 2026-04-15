@@ -84,8 +84,19 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
                 if d["node"] is None and d["prompt_id"] == prompt_id:
                     logger.info("Workflow complete")
                     break
+            elif msg["type"] == "execution_error":
+                d = msg["data"]
+                logger.error(f"ComfyUI execution error: {d}")
+                raise Exception(f"ComfyUI error in node {d.get('node_id','?')} ({d.get('node_type','?')}): {d.get('exception_message','unknown')}")
 
     history = get_history(prompt_id)[prompt_id]
+    # Log any status errors from history
+    status = history.get("status", {})
+    if status.get("status_str") == "error":
+        msgs = status.get("messages", [])
+        err_msgs = [m for m in msgs if m[0] == "execution_error"]
+        if err_msgs:
+            raise Exception(f"ComfyUI workflow error: {err_msgs[0]}")
     output_videos = {}
     for node_id in history["outputs"]:
         node_output = history["outputs"][node_id]
@@ -229,6 +240,25 @@ def handler(job):
             break
 
     if not output_path or not os.path.exists(output_path):
+        # Diagnose missing models
+        model_dir = "/ComfyUI/models"
+        missing = []
+        expected = [
+            "diffusion_models/Wan2_1-InfiniteTalk-Single_fp8_e4m3fn_scaled_KJ.safetensors",
+            "diffusion_models/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors",
+            "loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
+            "vae/Wan2_1_VAE_bf16.safetensors",
+            "text_encoders/umt5-xxl-enc-fp8_e4m3fn.safetensors",
+            "clip_vision/clip_vision_h.safetensors",
+            "diffusion_models/MelBandRoformer_fp16.safetensors",
+        ]
+        for f in expected:
+            p = f"{model_dir}/{f}"
+            size = os.path.getsize(p) if os.path.exists(p) else 0
+            if size < 1024 * 1024:  # < 1MB = missing/broken
+                missing.append(f"{f} (size={size})")
+        if missing:
+            return {"error": f"Missing models: {missing}"}
         return {"error": "No video output produced. Check ComfyUI logs."}
 
     filename = f"infinitetalk_{task_id}.mp4"
