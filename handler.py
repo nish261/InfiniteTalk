@@ -231,16 +231,49 @@ def handler(job):
     if not output_path or not os.path.exists(output_path):
         return {"error": "No video output produced. Check ComfyUI logs."}
 
-    # ── Return base64 or network-volume path ──────────────────────────────
+    filename = f"infinitetalk_{task_id}.mp4"
+
+    # ── Upload to Hermes VPS ──────────────────────────────────────────────
+    hermes_host = os.getenv("HERMES_HOST", "")
+    hermes_user = os.getenv("HERMES_USER", "runpod")
+    hermes_key  = os.getenv("HERMES_SSH_KEY", "")  # base64-encoded private key
+
+    if hermes_host and hermes_key:
+        try:
+            key_path = f"/tmp/hermes_key_{task_id}"
+            with open(key_path, "w") as f:
+                f.write(base64.b64decode(hermes_key).decode())
+            os.chmod(key_path, 0o600)
+
+            dest_path = f"/srv/videos/{filename}"
+            result = subprocess.run([
+                "scp", "-i", key_path,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=30",
+                output_path,
+                f"{hermes_user}@{hermes_host}:{dest_path}"
+            ], capture_output=True, text=True, timeout=120)
+
+            os.unlink(key_path)
+
+            if result.returncode == 0:
+                logger.info(f"Uploaded to Hermes: {dest_path}")
+                return {"video_url": f"scp://{hermes_host}{dest_path}", "filename": filename}
+            else:
+                logger.warning(f"Hermes upload failed: {result.stderr} — falling back to base64")
+        except Exception as e:
+            logger.warning(f"Hermes upload error: {e} — falling back to base64")
+
+    # ── Fallback: return base64 ───────────────────────────────────────────
     if inp.get("network_volume", False):
-        dest = f"/runpod-volume/infinitetalk_{task_id}.mp4"
+        dest = f"/runpod-volume/{filename}"
         shutil.copy2(output_path, dest)
         return {"video_path": dest}
-    else:
-        with open(output_path, "rb") as f:
-            video_b64 = base64.b64encode(f.read()).decode("utf-8")
-        logger.info(f"Returning {len(video_b64)} chars of base64 video")
-        return {"video": video_b64}
+
+    with open(output_path, "rb") as f:
+        video_b64 = base64.b64encode(f.read()).decode("utf-8")
+    logger.info(f"Returning {len(video_b64)} chars of base64 video")
+    return {"video": video_b64}
 
 
 runpod.serverless.start({"handler": handler})
