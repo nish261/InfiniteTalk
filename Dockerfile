@@ -40,29 +40,12 @@ RUN cd /ComfyUI/custom_nodes && \
     cd ComfyUI-WanVideoWrapper && pip install -r requirements.txt
 
 # Patch WanVideoWrapper: make allow_fp16_accumulation conditional (torch 2.7 nightly only)
-RUN python3 - << 'PYEOF'
-import glob, re
-for f in glob.glob('/ComfyUI/custom_nodes/ComfyUI-WanVideoWrapper/**/*.py', recursive=True):
-    txt = open(f).read()
-    if 'allow_fp16_accumulation' not in txt:
-        continue
-    # Remove the "raise Exception if not hasattr" guard
-    patched = re.sub(
-        r'[ \t]*if not hasattr\(torch\.backends\.cuda\.matmul,\s*["\']allow_fp16_accumulation["\']\)[^\n]*\n[ \t]*raise[^\n]*\n',
-        '',
-        txt
-    )
-    # Wrap the assignment itself in a hasattr check
-    patched = re.sub(
-        r'^([ \t]*)(torch\.backends\.cuda\.matmul\.allow_fp16_accumulation\s*=)',
-        r'\1if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"): \2',
-        patched,
-        flags=re.MULTILINE
-    )
-    if patched != txt:
-        open(f, 'w').write(patched)
-        print(f"Patched: {f}")
-PYEOF
+RUN python3 -c "\
+import glob, re;\
+files = glob.glob('/ComfyUI/custom_nodes/ComfyUI-WanVideoWrapper/**/*.py', recursive=True);\
+[open(f,'w').write(re.sub(r'(?m)^([ \t]*)if not hasattr\(torch.backends.cuda.matmul,[^)]+\):[^\n]*\n[ \t]*raise[^\n]*\n','',re.sub(r'(?m)^([ \t]*)(torch.backends.cuda.matmul.allow_fp16_accumulation\s*=)',r'\1if hasattr(torch.backends.cuda.matmul,\"allow_fp16_accumulation\"): \2',open(f).read()))) or print('Patched:',f) for f in files if 'allow_fp16_accumulation' in open(f).read()];\
+print('Patch done')\
+"
 
 RUN mkdir -p /ComfyUI/models/diffusion_models \
              /ComfyUI/models/loras \
