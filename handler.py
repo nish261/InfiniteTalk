@@ -1,358 +1,198 @@
 import runpod
 import os
-import websocket
+import sys
+import torch
+import numpy as np
 import base64
-import json
 import uuid
 import logging
-import urllib.request
-import urllib.parse
-import urllib.error
-import binascii
 import subprocess
-import librosa
 import shutil
+import librosa
+from einops import rearrange
+
+sys.path.insert(0, '/InfiniteTalk')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-server_address = os.getenv("SERVER_ADDRESS", "127.0.0.1")
-client_id = str(uuid.uuid4())
+WEIGHTS = "/runpod-volume/infinitetalk"
+CKPT_DIR = f"{WEIGHTS}/Wan2.1-I2V-14B-480P"
+WAV2VEC_DIR = f"{WEIGHTS}/chinese-wav2vec2-base"
+INFINITETALK_WEIGHTS = f"{WEIGHTS}/InfiniteTalk/single/infinitetalk.safetensors"
+
+# Loaded once per worker
+PIPELINE = None
+AUDIO_ENCODER = None
+WAV2VEC_FE = None
 
 
-def truncate_b64(s, n=50):
-    if not s:
-        return "None"
-    return s[:n] + f"...({len(s)} chars)" if len(s) > n else s
+def load_models():
+    global PIPELINE, AUDIO_ENCODER, WAV2VEC_FE
 
+    from wan import InfiniteTalkPipeline
+    from wan.configs import WAN_CONFIGS
+    from src.audio_analysis.wav2vec2 import Wav2Vec2Model
+    from transformers import Wav2Vec2FeatureExtractor
 
-def download_url(url, out_path):
-    result = subprocess.run(
-        ["wget", "-O", out_path, "--no-verbose", "--timeout=60", url],
-        capture_output=True, text=True, timeout=120,
+    logger.info("Loading InfiniteTalk pipeline...")
+    cfg = WAN_CONFIGS['infinitetalk-14B']
+    PIPELINE = InfiniteTalkPipeline(
+        config=cfg,
+        checkpoint_dir=CKPT_DIR,
+        infinitetalk_dir=INFINITETALK_WEIGHTS,
+        device_id=0,
+        rank=0,
+        t5_fsdp=False,
+        dit_fsdp=False,
+        use_usp=False,
+        t5_cpu=True,
+        init_on_cpu=True,
     )
-    if result.returncode != 0:
-        raise Exception(f"Download failed: {result.stderr}")
-    return out_path
+
+    logger.info("Loading audio encoder...")
+    AUDIO_ENCODER = Wav2Vec2Model.from_pretrained(
+        WAV2VEC_DIR, local_files_only=True
+    ).eval().cuda()
+    AUDIO_ENCODER.feature_extractor._freeze_parameters()
+
+    WAV2VEC_FE = Wav2Vec2FeatureExtractor.from_pretrained(
+        WAV2VEC_DIR, local_files_only=True
+    )
+    logger.info("All models loaded.")
 
 
-def save_b64(b64_data, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(base64.b64decode(b64_data))
-    return path
+def get_embedding(speech_array, sr=16000):
+    audio_duration = len(speech_array) / sr
+    video_length = audio_duration * 25  # 25 fps
+
+    audio_feature = np.squeeze(
+        WAV2VEC_FE(speech_array, sampling_rate=sr).input_values
+    )
+    audio_feature = torch.from_numpy(audio_feature).float().cuda().unsqueeze(0)
+
+    with torch.no_grad():
+        embeddings = AUDIO_ENCODER(
+            audio_feature, seq_len=int(video_length), output_hidden_states=True
+        )
+
+    audio_emb = torch.stack(embeddings.hidden_states[1:], dim=1).squeeze(0)
+    audio_emb = rearrange(audio_emb, "b s d -> s b d")
+    return audio_emb.cpu().detach()
 
 
-def process_input(data, path, mode):
-    if mode == "path":
-        return data
-    elif mode == "url":
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        return download_url(data, path)
-    elif mode == "base64":
-        return save_b64(data, path)
-    raise Exception(f"Unknown mode: {mode}")
-
-
-def queue_prompt(prompt, input_type="image", person_count="single"):
-    url = f"http://{server_address}:8188/prompt"
-    p = {"prompt": prompt, "client_id": client_id}
-    data = json.dumps(p).encode("utf-8")
-    req = urllib.request.Request(url, data=data)
-    req.add_header("Content-Type", "application/json")
+def loudness_norm(audio_array, sr=16000, target=-23.0):
     try:
-        response = urllib.request.urlopen(req)
-        return json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise Exception(f"ComfyUI /prompt rejected (HTTP {e.code}): {body}")
-
-
-def get_history(prompt_id):
-    url = f"http://{server_address}:8188/history/{prompt_id}"
-    with urllib.request.urlopen(url) as r:
-        return json.loads(r.read())
-
-
-def get_videos(ws, prompt, input_type="image", person_count="single"):
-    prompt_id = queue_prompt(prompt, input_type, person_count)["prompt_id"]
-    logger.info(f"Workflow submitted: {prompt_id}")
-
-    while True:
-        out = ws.recv()
-        if isinstance(out, str):
-            msg = json.loads(out)
-            if msg["type"] == "executing":
-                d = msg["data"]
-                if d["node"] is not None:
-                    logger.info(f"Running node: {d['node']}")
-                if d["node"] is None and d["prompt_id"] == prompt_id:
-                    logger.info("Workflow complete")
-                    break
-            elif msg["type"] == "execution_error":
-                d = msg["data"]
-                logger.error(f"ComfyUI execution error: {d}")
-                raise Exception(f"ComfyUI error in node {d.get('node_id','?')} ({d.get('node_type','?')}): {d.get('exception_message','unknown')}")
-
-    history = get_history(prompt_id)[prompt_id]
-    # Log any status errors from history
-    status = history.get("status", {})
-    if status.get("status_str") == "error":
-        msgs = status.get("messages", [])
-        err_msgs = [m for m in msgs if m[0] == "execution_error"]
-        if err_msgs:
-            raise Exception(f"ComfyUI workflow error: {err_msgs[0]}")
-    output_videos = {}
-    for node_id in history["outputs"]:
-        node_output = history["outputs"][node_id]
-        paths = []
-        if "gifs" in node_output:
-            for video in node_output["gifs"]:
-                vpath = video["fullpath"]
-                if os.path.exists(vpath) and os.path.getsize(vpath) > 1024:
-                    paths.append(vpath)
-                    logger.info(f"Found video: {vpath} ({os.path.getsize(vpath)} bytes)")
-                else:
-                    logger.warning(f"Missing or empty: {vpath}")
-        output_videos[node_id] = paths
-    return output_videos
-
-
-def get_audio_duration(path):
-    try:
-        return librosa.get_duration(path=path)
-    except Exception as e:
-        logger.warning(f"Duration check failed: {e}")
-        return None
-
-
-def calc_max_frames(wav_path, fps=25):
-    dur = get_audio_duration(wav_path)
-    if dur is None:
-        return 81
-    frames = int(dur * fps) + 81
-    logger.info(f"Audio {dur:.1f}s → max_frames={frames}")
-    return frames
+        import pyloudnorm as pyln
+        meter = pyln.Meter(sr)
+        loudness = meter.integrated_loudness(audio_array)
+        return pyln.normalize.loudness(audio_array, loudness, target).astype(np.float32)
+    except Exception:
+        return audio_array.astype(np.float32)
 
 
 def handler(job):
     inp = job.get("input", {})
-    task_id = f"task_{uuid.uuid4()}"
-    tmp = f"/tmp/{task_id}"
+    task_id = uuid.uuid4().hex[:8]
+    tmp = f"/tmp/it_{task_id}"
     os.makedirs(tmp, exist_ok=True)
 
-    # ── Input type / person count ─────────────────────────────────────────
-    input_type   = inp.get("input_type", "image")
-    person_count = inp.get("person_count", "single")
-    logger.info(f"input_type={input_type} person_count={person_count}")
-
-    # ── Image input ───────────────────────────────────────────────────────
-    if input_type == "image":
-        if "image_path" in inp:
-            media_path = process_input(inp["image_path"], f"{tmp}/input_image.jpg", "path")
-        elif "image_url" in inp:
-            media_path = process_input(inp["image_url"], f"{tmp}/input_image.jpg", "url")
-        elif "image_base64" in inp:
-            media_path = process_input(inp["image_base64"], f"{tmp}/input_image.jpg", "base64")
-        else:
-            media_path = "/examples/image.jpg"
-    else:
-        if "video_path" in inp:
-            media_path = process_input(inp["video_path"], f"{tmp}/input_video.mp4", "path")
-        elif "video_url" in inp:
-            media_path = process_input(inp["video_url"], f"{tmp}/input_video.mp4", "url")
-        elif "video_base64" in inp:
-            media_path = process_input(inp["video_base64"], f"{tmp}/input_video.mp4", "base64")
-        else:
-            media_path = "/examples/image.jpg"
-
-    # ── Audio input ───────────────────────────────────────────────────────
-    if "wav_path" in inp:
-        wav_path = process_input(inp["wav_path"], f"{tmp}/input_audio.wav", "path")
-    elif "wav_url" in inp:
-        wav_path = process_input(inp["wav_url"], f"{tmp}/input_audio.wav", "url")
-    elif "wav_base64" in inp:
-        wav_path = process_input(inp["wav_base64"], f"{tmp}/input_audio.wav", "base64")
-    else:
-        wav_path = "/examples/audio.mp3"
-
-    # Validate files exist
-    for label, path in [("media", media_path), ("audio", wav_path)]:
-        if not os.path.exists(path):
-            return {"error": f"{label} file not found: {path}"}
-    logger.info(f"media={media_path} ({os.path.getsize(media_path)} bytes)")
-    logger.info(f"audio={wav_path} ({os.path.getsize(wav_path)} bytes)")
-
-    # ── Workflow parameters ───────────────────────────────────────────────
-    prompt_text  = inp.get("prompt", "a person is talking expressively, natural hand gestures")
-    width        = inp.get("width", 512)
-    height       = inp.get("height", 512)
-    max_frame    = inp.get("max_frame") or calc_max_frames(wav_path)
-    force_offload = inp.get("force_offload", True)
-
-    # Snap to 16-pixel multiples (WanVideo requirement)
-    width  = (width  // 16) * 16
-    height = (height // 16) * 16
-
-    workflow_path = "/I2V_single.json"
-    with open(workflow_path) as f:
-        prompt = json.load(f)
-
-    # Copy inputs into ComfyUI input dir (ComfyUI validates paths relative to input/)
-    comfy_input_dir = "/ComfyUI/input"
-    os.makedirs(comfy_input_dir, exist_ok=True)
-    img_name = f"{task_id}_image.jpg"
-    wav_name = f"{task_id}_audio.wav"
-    shutil.copy2(media_path, f"{comfy_input_dir}/{img_name}")
-    shutil.copy2(wav_path, f"{comfy_input_dir}/{wav_name}")
-    logger.info(f"Copied inputs → /ComfyUI/input/{img_name}, {wav_name}")
-
-    # Inject parameters
-    prompt["284"]["inputs"]["image"]  = img_name
-    prompt["125"]["inputs"]["audio"]  = wav_name
-    prompt["241"]["inputs"]["positive_prompt"] = prompt_text
-    prompt["245"]["inputs"]["value"]  = width
-    prompt["246"]["inputs"]["value"]  = height
-    prompt["270"]["inputs"]["value"]  = max_frame
-
-    # Force offload into sampler (prevents OOM)
-    for nid, nd in prompt.items():
-        if nd.get("class_type") == "WanVideoSampler":
-            nd.setdefault("inputs", {})["force_offload"] = force_offload
-            logger.info(f"WanVideoSampler ({nid}): force_offload={force_offload}")
-            break
-
-    # ── ComfyUI connection ────────────────────────────────────────────────
-    http_url = f"http://{server_address}:8188/"
-    for attempt in range(60):
-        try:
-            urllib.request.urlopen(http_url, timeout=5)
-            break
-        except Exception:
-            if attempt == 59:
-                return {"error": "ComfyUI failed to respond"}
-            import time; time.sleep(2)
-
-    # ── Verify required nodes are registered ─────────────────────────────
-    REQUIRED_NODES = [
-        "MultiTalkModelLoader",
-        "WanVideoModelLoader",
-        "WanVideoImageToVideoMultiTalk",
-        "MultiTalkWav2VecEmbeds",
-    ]
     try:
-        obj_info = json.loads(urllib.request.urlopen(
-            f"http://{server_address}:8188/object_info", timeout=10
-        ).read())
-        missing_nodes = [n for n in REQUIRED_NODES if n not in obj_info]
-        if missing_nodes:
-            # Grab relevant ComfyUI log lines to surface import errors
-            log_excerpt = ""
-            try:
-                with open("/tmp/comfyui.log") as lf:
-                    lines = lf.readlines()
-                relevant = [l.strip() for l in lines if any(
-                    k in l for k in ["MultiTalk", "WanVideoWrapper WARNING", "Error", "Traceback", "ImportError", "ModuleNotFoundError"]
-                )]
-                log_excerpt = "\n".join(relevant[-30:])
-            except Exception:
-                pass
-            return {"error": f"Missing ComfyUI nodes: {missing_nodes}. Log:\n{log_excerpt}"}
+        # ── Download image ────────────────────────────────────────────────
+        img_path = f"{tmp}/input.jpg"
+        if "image_url" in inp:
+            r = subprocess.run(
+                ["wget", "-q", "--timeout=60", "-O", img_path, inp["image_url"]],
+                capture_output=True, timeout=90
+            )
+            if r.returncode != 0:
+                return {"error": f"Image download failed: {r.stderr.decode()[:300]}"}
+        elif "image_base64" in inp:
+            with open(img_path, "wb") as f:
+                f.write(base64.b64decode(inp["image_base64"]))
+        else:
+            return {"error": "No image input (image_url or image_base64 required)"}
+
+        # ── Download audio ────────────────────────────────────────────────
+        raw_wav = f"{tmp}/input_raw.wav"
+        if "wav_url" in inp:
+            r = subprocess.run(
+                ["wget", "-q", "--timeout=60", "-O", raw_wav, inp["wav_url"]],
+                capture_output=True, timeout=90
+            )
+            if r.returncode != 0:
+                return {"error": f"Audio download failed: {r.stderr.decode()[:300]}"}
+        elif "wav_base64" in inp:
+            with open(raw_wav, "wb") as f:
+                f.write(base64.b64decode(inp["wav_base64"]))
+        else:
+            return {"error": "No audio input (wav_url or wav_base64 required)"}
+
+        # Normalize to 16kHz mono
+        wav_16k = f"{tmp}/audio.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_wav, "-ar", "16000", "-ac", "1", wav_16k],
+            capture_output=True, check=True
+        )
+
+        # ── Audio embedding ───────────────────────────────────────────────
+        speech_array, _ = librosa.load(wav_16k, sr=16000)
+        speech_array = loudness_norm(speech_array)
+
+        logger.info(f"Computing audio embedding for {len(speech_array)/16000:.1f}s audio...")
+        audio_emb = get_embedding(speech_array)
+        emb_path = f"{tmp}/audio_emb.pt"
+        torch.save(audio_emb, emb_path)
+
+        # ── Build input_clip ──────────────────────────────────────────────
+        prompt = inp.get("prompt", "a person is talking expressively with natural movements")
+        input_clip = {
+            'prompt': prompt,
+            'cond_video': img_path,
+            'cond_audio': {'person1': emb_path},
+            'video_audio': wav_16k,
+        }
+
+        # ── Generate ──────────────────────────────────────────────────────
+        sampling_steps = inp.get("sampling_steps", 40)
+        seed = inp.get("seed", -1)
+        max_frames = inp.get("max_frames", 1000)
+        logger.info(f"Generating video: steps={sampling_steps} seed={seed} max_frames={max_frames}")
+
+        video_tensor = PIPELINE.generate_infinitetalk(
+            input_clip,
+            size_buckget='infinitetalk-480',
+            motion_frame=9,
+            frame_num=81,
+            shift=5.0,
+            sampling_steps=sampling_steps,
+            text_guide_scale=5.0,
+            audio_guide_scale=4.0,
+            seed=seed,
+            offload_model=True,
+            max_frames_num=max_frames,
+        )
+
+        # ── Save ──────────────────────────────────────────────────────────
+        out_path = f"{tmp}/output.mp4"
+        from wan.utils.multitalk_utils import save_video_ffmpeg
+        save_video_ffmpeg(video_tensor, out_path, [wav_16k], fps=25)
+
+        if not os.path.exists(out_path) or os.path.getsize(out_path) < 1024:
+            return {"error": "Output video missing or empty"}
+
+        logger.info(f"Video generated: {os.path.getsize(out_path)} bytes")
+
+        with open(out_path, "rb") as f:
+            return {"video": base64.b64encode(f.read()).decode()}
+
     except Exception as e:
-        logger.warning(f"Node check failed: {e}")
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()[-2000:]}
 
-    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
-    ws = websocket.WebSocket()
-    for attempt in range(36):
-        try:
-            ws.connect(ws_url); break
-        except Exception:
-            if attempt == 35:
-                return {"error": "WebSocket connection timed out"}
-            import time; time.sleep(5)
-
-    videos = get_videos(ws, prompt, input_type, person_count)
-    ws.close()
-
-    # Cleanup ComfyUI input copies
-    for fn in [img_name, wav_name]:
-        try:
-            os.unlink(f"{comfy_input_dir}/{fn}")
-        except Exception:
-            pass
-
-    # ── Find output video ─────────────────────────────────────────────────
-    output_path = None
-    for nid in videos:
-        if videos[nid]:
-            output_path = videos[nid][0]
-            break
-
-    if not output_path or not os.path.exists(output_path):
-        # Diagnose missing models
-        model_dir = "/ComfyUI/models"
-        missing = []
-        expected = [
-            "diffusion_models/Wan2_1-InfiniteTalk-Single_fp8_e4m3fn_scaled_KJ.safetensors",
-            "diffusion_models/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors",
-            "loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
-            "vae/Wan2_1_VAE_bf16.safetensors",
-            "text_encoders/umt5-xxl-enc-fp8_e4m3fn.safetensors",
-            "clip_vision/clip_vision_h.safetensors",
-            "diffusion_models/MelBandRoformer_fp16.safetensors",
-        ]
-        for f in expected:
-            p = f"{model_dir}/{f}"
-            size = os.path.getsize(p) if os.path.exists(p) else 0
-            if size < 1024 * 1024:  # < 1MB = missing/broken
-                missing.append(f"{f} (size={size})")
-        if missing:
-            return {"error": f"Missing models: {missing}"}
-        return {"error": "No video output produced. Check ComfyUI logs."}
-
-    filename = f"infinitetalk_{task_id}.mp4"
-
-    # ── Upload to Hermes VPS ──────────────────────────────────────────────
-    hermes_host = os.getenv("HERMES_HOST", "")
-    hermes_user = os.getenv("HERMES_USER", "runpod")
-    hermes_key  = os.getenv("HERMES_SSH_KEY", "")  # base64-encoded private key
-
-    if hermes_host and hermes_key:
-        try:
-            key_path = f"/tmp/hermes_key_{task_id}"
-            with open(key_path, "w") as f:
-                f.write(base64.b64decode(hermes_key).decode())
-            os.chmod(key_path, 0o600)
-
-            dest_path = f"/srv/videos/{filename}"
-            result = subprocess.run([
-                "scp", "-i", key_path,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=30",
-                output_path,
-                f"{hermes_user}@{hermes_host}:{dest_path}"
-            ], capture_output=True, text=True, timeout=120)
-
-            os.unlink(key_path)
-
-            if result.returncode == 0:
-                logger.info(f"Uploaded to Hermes: {dest_path}")
-                return {"video_url": f"scp://{hermes_host}{dest_path}", "filename": filename}
-            else:
-                logger.warning(f"Hermes upload failed: {result.stderr} — falling back to base64")
-        except Exception as e:
-            logger.warning(f"Hermes upload error: {e} — falling back to base64")
-
-    # ── Fallback: return base64 ───────────────────────────────────────────
-    if inp.get("network_volume", False):
-        dest = f"/runpod-volume/{filename}"
-        shutil.copy2(output_path, dest)
-        return {"video_path": dest}
-
-    with open(output_path, "rb") as f:
-        video_b64 = base64.b64encode(f.read()).decode("utf-8")
-    logger.info(f"Returning {len(video_b64)} chars of base64 video")
-    return {"video": video_b64}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
+load_models()
 runpod.serverless.start({"handler": handler})
