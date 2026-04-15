@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y wget curl git && rm -rf /var/lib/apt/li
 # Upgrade PyTorch to >=2.6 to fix CVE-2025-32434 torch.load block
 RUN pip install -U "torch>=2.6.0" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-RUN pip install -U "huggingface_hub[hf_transfer]" runpod websocket-client librosa
+RUN pip install -U "huggingface_hub[hf_transfer]" runpod websocket-client librosa accelerate pyloudnorm
 
 WORKDIR /
 
