@@ -28,9 +28,9 @@ RUN pip install \
     librosa einops scipy \
     "xfuser>=0.4.1"
 
-COPY patch_flash_attn.py /patch_flash_attn.py
-# Patch flash_attn imports to catch ImportError (ABI mismatch), not just ModuleNotFoundError
-RUN python3 /patch_flash_attn.py
+COPY patch_compat.py /patch_compat.py
+# Patch Python 3.11 compat issues + flash_attn ABI mismatch
+RUN python3 /patch_compat.py
 
 # Install RunPod + HuggingFace tools
 RUN pip install runpod "huggingface_hub[hf_transfer]"
