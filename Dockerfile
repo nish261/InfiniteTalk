@@ -21,7 +21,8 @@ RUN pip install \
     pyloudnorm \
     "optimum-quanto==0.2.6" \
     scenedetect "moviepy==1.0.3" decord \
-    librosa einops scipy
+    librosa einops scipy \
+    "xfuser>=0.4.1"
 
 # Install RunPod + HuggingFace tools
 RUN pip install runpod "huggingface_hub[hf_transfer]"
