@@ -16,7 +16,26 @@ logger = logging.getLogger(__name__)
 WEIGHTS = "/runpod-volume/infinitetalk"
 CKPT_DIR = f"{WEIGHTS}/Wan2.1-I2V-14B-480P"
 WAV2VEC_DIR = f"{WEIGHTS}/chinese-wav2vec2-base"
-INFINITETALK_WEIGHTS = f"{WEIGHTS}/InfiniteTalk/single/infinitetalk.safetensors"
+
+def find_infinitetalk_weights():
+    """Search for single-person infinitetalk.safetensors in downloaded directory."""
+    import glob as _glob
+    it_dir = f"{WEIGHTS}/InfiniteTalk"
+    # Prefer single/ over multi/ or quant
+    for pattern in [
+        f"{it_dir}/single/*.safetensors",
+        f"{it_dir}/**/*single*.safetensors",
+        f"{it_dir}/**/*.safetensors",
+    ]:
+        matches = [f for f in _glob.glob(pattern, recursive=True)
+                   if 'multi' not in f.lower() and 'quant' not in f.lower()]
+        if matches:
+            return matches[0]
+    # Fallback: any safetensors
+    all_sf = _glob.glob(f"{it_dir}/**/*.safetensors", recursive=True)
+    return all_sf[0] if all_sf else None
+
+INFINITETALK_WEIGHTS = find_infinitetalk_weights() or f"{WEIGHTS}/InfiniteTalk/single/infinitetalk.safetensors"
 
 # Lazy-loaded — None until first job
 PIPELINE = None
@@ -41,17 +60,28 @@ def load_models():
         from src.audio_analysis.wav2vec2 import Wav2Vec2Model
         from transformers import Wav2Vec2FeatureExtractor
 
-        # Check model files exist
+        # Re-resolve InfiniteTalk weights at load time (path discovered at import)
+        import glob as _glob
+        it_weights = find_infinitetalk_weights()
+        logger.info(f"InfiniteTalk weights resolved: {it_weights}")
+        if it_weights is None:
+            # List what's actually in the dir to help debug
+            it_dir = f"{WEIGHTS}/InfiniteTalk"
+            found = _glob.glob(f"{it_dir}/**/*", recursive=True)[:20]
+            err = f"InfiniteTalk safetensors not found. Files in {it_dir}: {found}"
+            LOAD_ERROR = err
+            return err
+
+        # Check other model dirs exist
         missing = []
         for path, label in [
             (CKPT_DIR, "Wan2.1-I2V-14B-480P"),
             (WAV2VEC_DIR, "chinese-wav2vec2-base"),
-            (INFINITETALK_WEIGHTS, "InfiniteTalk weights"),
         ]:
             if not os.path.exists(path):
                 missing.append(f"{label} ({path})")
         if missing:
-            err = f"Missing model files: {missing}"
+            err = f"Missing model dirs: {missing}"
             LOAD_ERROR = err
             return err
 
@@ -60,7 +90,7 @@ def load_models():
         PIPELINE = InfiniteTalkPipeline(
             config=cfg,
             checkpoint_dir=CKPT_DIR,
-            infinitetalk_dir=INFINITETALK_WEIGHTS,
+            infinitetalk_dir=it_weights,
             device_id=0,
             rank=0,
             t5_fsdp=False,
