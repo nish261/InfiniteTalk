@@ -28,17 +28,9 @@ RUN pip install \
     librosa einops scipy \
     "xfuser>=0.4.1"
 
+COPY patch_flash_attn.py /patch_flash_attn.py
 # Patch flash_attn imports to catch ImportError (ABI mismatch), not just ModuleNotFoundError
-RUN python3 -c "
-import re, glob
-for f in glob.glob('/InfiniteTalk/**/*.py', recursive=True):
-    src = open(f).read()
-    if 'except ModuleNotFoundError' in src and 'flash_attn' in src:
-        patched = src.replace('except ModuleNotFoundError:', 'except Exception:')
-        open(f, 'w').write(patched)
-        print('Patched:', f)
-print('Done')
-"
+RUN python3 /patch_flash_attn.py
 
 # Install RunPod + HuggingFace tools
 RUN pip install runpod "huggingface_hub[hf_transfer]"
