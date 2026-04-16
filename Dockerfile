@@ -2,8 +2,12 @@ FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 RUN apt-get update && apt-get install -y wget curl git ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Upgrade PyTorch to fix CVE-2025-32434
-RUN pip install -U "torch>=2.6.0" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Pin torch/torchvision/torchaudio + xformers together to avoid version mismatch
+RUN pip install \
+    "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0" \
+    --index-url https://download.pytorch.org/whl/cu124 && \
+    pip install "xformers==0.0.29.post3" \
+    --index-url https://download.pytorch.org/whl/cu124
 
 # Clone InfiniteTalk
 RUN git clone https://github.com/MeiGen-AI/InfiniteTalk.git /InfiniteTalk
@@ -23,7 +27,6 @@ RUN pip install \
     scenedetect "moviepy==1.0.3" decord \
     librosa einops scipy \
     "xfuser>=0.4.1" \
-    xformers \
     flash-attn --no-build-isolation
 
 # Install RunPod + HuggingFace tools
